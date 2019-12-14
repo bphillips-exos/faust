@@ -27,6 +27,7 @@ from faust.types.models import (
 from faust.utils import iso8601
 
 from .tags import Tag
+from .typing import TypeExpression
 
 __all__ = [
     'TYPE_TO_FIELD',
@@ -166,6 +167,13 @@ class FieldDescriptor(FieldDescriptorT[T]):
             date_parser = iso8601.parse
         self.date_parser: Callable[[Any], datetime] = date_parser
         self.tag = tag
+
+        expr = TypeExpression(self.type)
+        comprehension = expr.as_function(stacklevel=2)
+        if expr.has_models:
+            self.to_python = comprehension
+        else:
+            self.to_python = None
 
     def __set_name__(self, owner: Type[ModelT], name: str) -> None:
         self.model = owner

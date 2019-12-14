@@ -544,8 +544,6 @@ class Record(Model, abstract=True):  # type: ignore
             coerce = field_coerce.get(field)
             fieldval = f'{field}'
             if model is not None:
-                initfield[field] = _field_callback(model, _to_model)
-                assert initfield[field] is not None
                 fieldval = f'self._init_field("{field}", {field})'
             else:
                 field_type = fields[field]
@@ -650,6 +648,9 @@ class Record(Model, abstract=True):  # type: ignore
         initfun = options.initfield.get(field)
         if initfun:
             value = initfun(value)
+        descriptor = options.descriptors.get(field)
+        if descriptor and descriptor.to_python is not None:
+            value = descriptor.to_python(value)
         return value
 
     @classmethod
