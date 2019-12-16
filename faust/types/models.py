@@ -30,7 +30,6 @@ __all__ = [
     'ModelArg',
     'ModelOptions',
     'ModelT',
-    'TypeCoerce',
     'TypeInfo',
 ]
 
@@ -63,11 +62,6 @@ ModelArg = Union[Type['ModelT'], Type[bytes], Type[str]]
 IsInstanceArgT = Union[Type, Tuple[Type, ...]]
 CoercionHandler = Callable[[Any], Any]
 CoercionMapping = MutableMapping[IsInstanceArgT, CoercionHandler]
-
-
-class TypeCoerce(NamedTuple):
-    target: Type
-    handler: CoercionHandler
 
 
 class TypeInfo(NamedTuple):
@@ -119,11 +113,6 @@ class ModelOptions(abc.ABC):
     # Index: Set of field names that are ModelT and their concrete type
     modelattrs: Mapping[str, Optional[Type]] = cast(
         Mapping[str, Optional[Type]], None)
-
-    #: Index: Mapping of fields that need to be coerced.
-    #: Key is the name of the field, value is the coercion handler function.
-    field_coerce: Mapping[str, TypeCoerce] = cast(
-        Mapping[str, TypeCoerce], None)
 
     #: Mapping of field names to default value.
     defaults: Mapping[str, Any] = cast(  # noqa: E704 (flake8 bug)
@@ -251,6 +240,10 @@ class FieldDescriptorT(Generic[T]):
             Callable[[Any], datetime], date_parser)
 
     @abc.abstractmethod
+    def on_model_attached(self) -> None:
+        ...
+
+    @abc.abstractmethod
     def clone(self, **kwargs: Any) -> 'FieldDescriptorT':
         ...
 
@@ -264,6 +257,10 @@ class FieldDescriptorT(Generic[T]):
 
     @abc.abstractmethod
     def validate(self, value: T) -> Iterable[ValidationError]:
+        ...
+
+    @abc.abstractmethod
+    def to_python(self, value: Any) -> Optional[T]:
         ...
 
     @abc.abstractmethod

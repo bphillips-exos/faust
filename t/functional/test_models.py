@@ -1,7 +1,7 @@
 import abc
 from datetime import datetime
 from decimal import Decimal
-from typing import ClassVar, Dict, List, Mapping, Optional, Set, Tuple, Union
+from typing import ClassVar, Dict, List, Mapping, Optional, Set, Tuple
 from dateutil.parser import parse as parse_date
 import faust
 from faust.exceptions import SecurityError, ValidationError
@@ -15,10 +15,8 @@ from faust.models.fields import (
     StringField,
 )
 from mode.utils.logging import get_logger
-from faust.models.record import _is_of_type
 from faust.models.tags import Secret, Sensitive, _FrameLocal
 from faust.types import ModelT
-from faust.utils import iso8601
 from faust.utils import json
 import pytest
 
@@ -147,7 +145,7 @@ def test_datetimes():
         date: Optional[datetime]
 
     class TupleOfDate(Record, coerce=True):
-        dates: Tuple[datetime]
+        dates: Tuple[datetime, ...]
 
     class SetOfDate(Record, coerce=True):
         dates: Set[datetime]
@@ -199,7 +197,7 @@ def test_datetimes__isodates_compat():
         date: datetime
 
     class TupleOfDate(Record, coerce=False, isodates=True):
-        dates: Tuple[datetime]
+        dates: Tuple[datetime, ...]
 
     class SetOfDate(Record, coerce=False, isodates=True):
         dates: Set[datetime]
@@ -258,7 +256,7 @@ def test_decimals():
         numbers: Optional[List[Decimal]]
 
     class TupleOfDecimal(Record, coerce=True, serializer='json'):
-        numbers: Tuple[Decimal]
+        numbers: Tuple[Decimal, ...]
 
     class SetOfDecimal(Record, coerce=True, serializer='json'):
         numbers: Set[Decimal]
@@ -320,7 +318,7 @@ def test_decimals_compat():
                          coerce=False,
                          decimals=True,
                          serializer='json'):
-        numbers: Tuple[Decimal]
+        numbers: Tuple[Decimal, ...]
 
     class SetOfDecimal(Record,
                        coerce=False,
@@ -399,7 +397,7 @@ def test_custom_coercion():
         foos: Optional[List[Foo]]
 
     class TupleOfFoo(CanFooModel):
-        foos: Tuple[Foo]
+        foos: Tuple[Foo, ...]
 
     class SetOfFoo(CanFooModel):
         foos: Set[Foo]
@@ -658,7 +656,6 @@ def test_too_many_arguments_raises_TypeError():
     with pytest.raises(TypeError) as einfo:
         Y(10, 20, 30)
     reason = str(einfo.value)
-    print(reason)
     assert '__init__() takes' in reason
 
 
@@ -1013,20 +1010,6 @@ def test_repr():
 
 def test_ident():
     assert Account.id.ident == 'Account.id'
-
-
-DATETIME1 = datetime(2012, 6, 5, 13, 33, 0)
-
-
-@pytest.mark.parametrize('input,expected', [
-    (None, None),
-    (DATETIME1, DATETIME1),
-    (DATETIME1.isoformat(), DATETIME1),
-
-])
-def test_parse_iso8601(input, expected):
-    assert Record._init_maybe_coerce(
-        iso8601.parse, datetime, input) == expected
 
 
 def test_list_field_refers_to_self():
@@ -1505,18 +1488,6 @@ def test_lazy_creation():
     assert LazyX._pending_finalizers is None
 
 
-@pytest.mark.parametrize('typ,input,expected', [
-    ('foo', int, False),
-    ('foo', str, True),
-    ('foo', Optional[str], True),
-    ('foo', Optional[Union[str, int]], True),
-    ('foo', Optional[Union[Union[float, str], int]], True),
-    ('foo', Optional[Union[Union[float, bytes], int]], False),
-])
-def test__is_of_type(typ, input, expected):
-    assert _is_of_type(typ, input) == expected
-
-
 def test_Sensitive(*, capsys):
 
     class Foo(Record):
@@ -1532,8 +1503,6 @@ def test_Sensitive(*, capsys):
         bar: List[Bar]
 
     x = Foo(name='Foo', phone_number='631-342-3412')
-
-    print(Foo.phone_number)
 
     assert Foo._options.has_sensitive_fields
     assert Foo._options.has_tagged_fields

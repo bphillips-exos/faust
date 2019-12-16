@@ -131,6 +131,8 @@ class FieldDescriptor(FieldDescriptorT[T]):
     #: Field may be tagged with Secret/Sensitive/etc.
     tag: Optional[Type[Tag]]
 
+    _to_python: Optional[Callable[[T], T]]
+
     def __init__(self, *,
                  field: str = None,
                  input_name: str = None,
@@ -167,13 +169,22 @@ class FieldDescriptor(FieldDescriptorT[T]):
             date_parser = iso8601.parse
         self.date_parser: Callable[[Any], datetime] = date_parser
         self.tag = tag
+        self._to_python = None
 
-        expr = TypeExpression(self.type)
+    def on_model_attached(self) -> None:
+        self._to_python = self._compile_type_expression()
+
+    def _compile_type_expression(self) -> Optional[Callable[[T], T]]:
+        assert self.model is not None
+        expr = TypeExpression(
+            self.type,
+            user_types=self.model._options.coercions,
+        )
         comprehension = expr.as_function(stacklevel=2)
-        if expr.has_models:
-            self.to_python = comprehension
-        else:
-            self.to_python = None
+        if (expr.has_generic_types and
+                expr.has_custom_types) or expr.has_nonfield_types:
+            return cast(Callable, comprehension)
+        return None
 
     def __set_name__(self, owner: Type[ModelT], name: str) -> None:
         self.model = owner
@@ -220,6 +231,12 @@ class FieldDescriptor(FieldDescriptorT[T]):
 
     def validate(self, value: T) -> Iterable[ValidationError]:
         return iter([])
+
+    def to_python(self, value: Any) -> Optional[T]:
+        to_python = self._to_python
+        if to_python is not None:
+            value = to_python(value)
+        return self.prepare_value(value)
 
     def prepare_value(self, value: Any, *,
                       coerce: bool = None) -> Optional[T]:
@@ -350,6 +367,14 @@ class DecimalField(NumberField[Decimal]):
             'max_decimal_places': max_decimal_places,
         })
 
+    def to_python(self, value: Any) -> Any:
+        if self._to_python is None:
+            if self.model._options.decimals:
+                return self.prepare_value(value, coerce=True)
+            return self.prepare_value(value)
+        else:
+            return self._to_python(value)
+
     def prepare_value(self, value: Any, *,
                       coerce: bool = None) -> Optional[Decimal]:
         return Decimal(value) if self.should_coerce(value, coerce) else value
@@ -434,6 +459,14 @@ class StringField(CharField[str]):
 
 
 class DatetimeField(FieldDescriptor[datetime]):
+
+    def to_python(self, value: Any) -> Any:
+        if self._to_python is None:
+            if self.model._options.isodates:
+                return self.prepare_value(value, coerce=True)
+            return self.prepare_value(value)
+        else:
+            return self._to_python(value)
 
     def prepare_value(self, value: Any, *,
                       coerce: bool = None) -> Optional[datetime]:
