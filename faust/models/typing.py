@@ -1,7 +1,9 @@
 import abc
+import os
 import random
 import string
 import sys
+from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
@@ -12,9 +14,11 @@ from typing import (
     Callable,
     ClassVar,
     Dict,
+    Iterator,
     List,
     NamedTuple,
     Optional,
+    Set,
     Tuple,
     Type,
     TypeVar,
@@ -26,7 +30,6 @@ from mode.utils.objects import (
     LIST_TYPES,
     SET_TYPES,
     TUPLE_TYPES,
-    _remove_optional,
     cached_property,
     is_optional,
     is_union,
@@ -44,7 +47,7 @@ from faust.types.models import (
 from faust.utils.iso8601 import parse as parse_iso8601
 from faust.utils.json import str_to_decimal
 
-__all__ = ['TypeExpression']
+__all__ = ['NodeType', 'TypeExpression']
 
 T = TypeVar('T')
 MISSING: Final = object()
@@ -57,6 +60,8 @@ JSON_TYPES: IsInstanceArgT = (  # XXX FIXME
     float,
     Decimal,
 )
+LITERAL_TYPES: IsInstanceArgT = (str, bytes, float, int)
+DEBUG = bool(os.environ.get('TYPEXPR_DEBUG', False))
 
 _getframe: Callable[[int], FrameType] = getattr(sys, '_getframe')  # noqa
 
@@ -109,9 +114,17 @@ NONFIELD_TYPES = frozenset({
 
 class TypeInfo(NamedTuple):
     type: Type
-    poly_type: Type
     args: Tuple
     is_optional: bool
+
+
+def _TypeInfo_from_type(typ: Type, *, optional: bool = False) -> TypeInfo:
+    # Python 3.6.0 does not support classmethod in NamedTuple
+    return TypeInfo(
+        type=typ,
+        args=tuple(getattr(typ, '__args__', None) or ()),
+        is_optional=optional,
+    )
 
 
 class Variable:
@@ -155,6 +168,7 @@ class Variable:
 class Node(abc.ABC):
     BUILTIN_TYPES: ClassVar[Dict[NodeType, Type['Node']]] = {}
     type: ClassVar[NodeType]
+    use_origin: ClassVar[bool] = False
 
     compatible_types: IsInstanceArgT
 
@@ -175,27 +189,40 @@ class Node(abc.ABC):
         cls.BUILTIN_TYPES[cls.type] = cls
 
     @classmethod
-    def _is_compatible(cls, info: TypeInfo) -> Tuple[bool, Optional[Type]]:
+    def create_if_compatible(cls, typ: Type, *,
+                             root: 'RootNode') -> Optional['Node']:
         if cls.compatible_types:
-            try:
-                if cls._issubclass(info.poly_type, cls.compatible_types):
-                    return True, info.type
-            except TypeError:
-                pass
-        return False, None
+            target_type: Type = typ
+            if cls.use_origin:
+                target_type = getattr(typ, '__origin__', None) or typ
+            if cls._issubclass(target_type, cls.compatible_types):
+                return cls(typ, root=root)
+        return None
 
     @classmethod
     def _issubclass(cls, typ: Type, types: IsInstanceArgT) -> bool:
         try:
             return issubclass(typ, types)
-        except TypeError:
+        except (AttributeError, TypeError):
             return False
 
     @classmethod
     def inspect_type(cls, typ: Type) -> TypeInfo:
         optional = is_optional(typ)
-        args, poly_type = _remove_optional(typ, find_origin=True)
-        return TypeInfo(typ, poly_type, tuple(args), optional)
+        if optional:
+            args = getattr(typ, '__args__', ())
+            union_args: List[Type] = []
+            found_none = False
+            for arg in args:
+                if _is_NoneType(arg):
+                    found_none = True
+                else:
+                    union_args.append(arg)
+            if len(union_args) == 1:
+                assert found_none
+                return _TypeInfo_from_type(union_args[0], optional=True)
+            return _TypeInfo_from_type(typ, optional=True)
+        return _TypeInfo_from_type(typ, optional=False)
 
     def __init__(self, expr: Type, root: 'RootNode' = None) -> None:
         assert root is not None
@@ -205,6 +232,8 @@ class Node(abc.ABC):
         self.root.type_stats[self.type] += 1
         assert self.root.type_stats[NodeType.ROOT] == 1
         self.__post_init__()
+        if DEBUG:
+            print(f'NODE {self!r}')
 
     def __post_init__(self) -> None:
         ...
@@ -216,16 +245,20 @@ class Node(abc.ABC):
     def compile(self, var: Variable, *args: Type) -> str:
         ...
 
+    def __repr__(self) -> str:
+        return f'<{type(self).__name__}: {self.expr!r}>'
+
 
 class AnyNode(Node):
     type = NodeType.ANY
     compatible_types = ()
 
     @classmethod
-    def _is_compatible(cls, info: TypeInfo) -> Tuple[bool, Optional[Type]]:
-        if info.type is Any:
-            return True, info.type
-        return False, None
+    def create_if_compatible(cls, typ: Type, *,
+                             root: 'RootNode') -> Optional['Node']:
+        if typ is Any:
+            return cls(typ, root=root)
+        return None
 
     def compile(self, var: Variable, *args: Type) -> str:
         return f'{var}'
@@ -234,15 +267,43 @@ class AnyNode(Node):
 class UnionNode(Node):
     type = NodeType.UNION
     compatible_types = ()
+    use_origin = True
 
     @classmethod
-    def _is_compatible(cls, info: TypeInfo) -> Tuple[bool, Optional[Type]]:
-        return False, None
+    def _maybe_unroll_union(cls, info: TypeInfo) -> TypeInfo:
+        if is_union(info.type):
+            assert len(info.args) > 1
+            if cls._all_types_match(ModelT, info.args):
+                return _TypeInfo_from_type(ModelT, optional=info.is_optional)
+            elif cls._all_types_match(LITERAL_TYPES, info.args):
+                return _TypeInfo_from_type(
+                    info.args[0], optional=info.is_optional)
+        return info
+
+    @classmethod
+    def create_if_compatible(cls, typ: Type, *,
+                             root: 'RootNode') -> Optional['Node']:
+        if is_union(typ):
+            return cls(typ, root=root)
+        return None
+
+    @classmethod
+    def _all_types_match(cls, typ: IsInstanceArgT, union_args: Tuple) -> bool:
+        return all(
+            cls._issubclass(x, typ) for x in cls._filter_NoneType(union_args)
+        )
+
+    @classmethod
+    def _filter_NoneType(self, union_args: Tuple) -> Iterator:
+        return (x for x in union_args if not _is_NoneType(x))
+
+    def compile(self, var: Variable, *args: Type) -> str:
+        raise NotImplementedError(f'Union of types {args!r} not supported')
 
 
 class LiteralNode(Node):
     type = NodeType.LITERAL
-    compatible_types = (str, bytes, float, int)
+    compatible_types = LITERAL_TYPES
 
     def compile(self, var: Variable, *args: Type) -> str:
         return f'{var}'
@@ -251,6 +312,9 @@ class LiteralNode(Node):
 class DecimalNode(Node):
     type = NodeType.DECIMAL
     compatible_types = (Decimal,)
+
+    def __post_init__(self) -> None:
+        self.root.found_types[self.type].add(self.expr)
 
     def compile(self, var: Variable, *args: Type) -> str:
         self.root.extra_locals.setdefault('_Decimal_', self._maybe_coerce)
@@ -265,21 +329,23 @@ class DecimalNode(Node):
         return None
 
 
-class DateTimeNode(Node):
+class DatetimeNode(Node):
     type = NodeType.DATETIME
     compatible_types = (datetime,)
+
+    def __post_init__(self) -> None:
+        self.root.found_types[self.type].add(self.expr)
 
     def compile(self, var: Variable, *args: Type) -> str:
         self.root.extra_locals.setdefault(
             '_iso8601_parse_', self._maybe_coerce)
         return f'_iso8601_parse_({var})'
 
-    @staticmethod
     def _maybe_coerce(
-            value: Union[str, datetime] = None) -> Optional[datetime]:
+            self, value: Union[str, datetime] = None) -> Optional[datetime]:
         if value is not None:
             if isinstance(value, str):
-                return parse_iso8601(value)
+                return self.root.date_parser(value)
             return value
         return None
 
@@ -289,19 +355,14 @@ class NamedTupleNode(Node):
     compatible_types = TUPLE_TYPES
 
     @classmethod
-    def _is_compatible(cls, info: TypeInfo) -> Tuple[bool, Optional[Type]]:
-        typ = info.type
-        try:
-            is_tuple = issubclass(info.poly_type, cls.compatible_types)
-        except TypeError:
-            pass
-        else:
-            if (is_tuple and
-                    '_asdict' in typ.__dict__ and
+    def create_if_compatible(cls, typ: Type, *,
+                             root: 'RootNode') -> Optional['Node']:
+        if cls._issubclass(typ, cls.compatible_types):
+            if ('_asdict' in typ.__dict__ and
                     '_make' in typ.__dict__ and
-                    '_fields_defaults' in typ.__dict__):
-                return True, info.type
-        return False, None
+                    '_fields' in typ.__dict__):
+                return cls(typ, root=root)
+        return None
 
     def compile(self, var: Variable, *args: Type) -> str:
         self.root.extra_locals.setdefault(self.local_name, self.expr)
@@ -325,6 +386,7 @@ class NamedTupleNode(Node):
 class TupleNode(Node):
     type = NodeType.TUPLE
     compatible_types = TUPLE_TYPES
+    use_origin = True
 
     def compile(self, var: Variable, *args: Type) -> str:
         if not args:
@@ -355,6 +417,7 @@ class TupleNode(Node):
 class SetNode(Node):
     type = NodeType.SET
     compatible_types = SET_TYPES
+    use_origin = True
 
     def compile(self, var: Variable, *args: Type) -> str:
         if not args:
@@ -370,6 +433,7 @@ class SetNode(Node):
 class DictNode(Node):
     type = NodeType.DICT
     compatible_types = DICT_TYPES
+    use_origin = True
 
     def compile(self, var: Variable, *args: Type) -> str:
         if not args:
@@ -389,6 +453,7 @@ class DictNode(Node):
 class ListNode(Node):
     type = NodeType.LIST
     compatible_types = LIST_TYPES
+    use_origin = True
 
     def compile(self, var: Variable, *args: Type) -> str:
         if not args:
@@ -405,17 +470,15 @@ class ModelNode(Node):
     type = NodeType.MODEL
     compatible_types = ()
 
+    def __post_init__(self) -> None:
+        self.root.found_types[self.type].add(self.expr)
+
     @classmethod
-    def _is_compatible(cls, info: TypeInfo) -> Tuple[bool, Optional[Type]]:
-        args = getattr(info.type, '__args__', ())
-        if is_union(info.type) and len(args):
-            for arg in args:
-                arginfo = cls.inspect_type(arg)
-                if cls._is_model(arginfo.type):
-                    return True, arginfo.type
-        if cls._is_model(info.type):
-            return True, info.type
-        return False, None
+    def create_if_compatible(cls, typ: Type, *,
+                             root: 'RootNode') -> Optional['Node']:
+        if cls._is_model(typ):
+            return cls(typ, root=root)
+        return None
 
     @classmethod
     def _is_model(cls, typ: Type) -> bool:
@@ -452,6 +515,9 @@ class UserNode(Node):
         self.handler: CoercionHandler = handler
         self.handler_name = qualname_to_identifier(qualname(self.handler))
 
+    def __post_init__(self) -> None:
+        self.root.found_types[self.type].add(self.expr)
+
     def _maybe_coerce(self, value: Any) -> Any:
         if value is None:
             return None
@@ -473,16 +539,25 @@ class RootNode(Node):
     user_types: CoercionMapping
     extra_locals: Dict[str, Any]
 
+    found_types: Dict[NodeType, Set[Type]]
+
     @classmethod
     def _register(cls) -> None:
         ...  # we do not register root nodes.
 
     def __init__(self, expr: Type, root: 'RootNode' = None, *,
-                 user_types: CoercionMapping = None) -> None:
+                 user_types: CoercionMapping = None,
+                 date_parser: Callable[[Any], datetime] = None) -> None:
         assert self.type == NodeType.ROOT
         self.type_stats = Counter()
         self.user_types = user_types or {}
         self.extra_locals = {}
+        self.date_parser: Callable[[Any], datetime]
+        if date_parser is not None:
+            self.date_parser = date_parser
+        else:
+            self.date_parser = parse_iso8601
+        self.found_types = defaultdict(set)
         super().__init__(expr, root=self)
 
     def find_compatible_node_or_default(self, info: TypeInfo) -> 'Node':
@@ -494,12 +569,13 @@ class RootNode(Node):
 
     def find_compatible_node(self, info: TypeInfo) -> Optional['Node']:
         for types, handler in self.user_types.items():
-            if self._issubclass(info.poly_type, types):
+            if self._issubclass(info.type, types):
                 return UserNode(info.type, root=self.root, handler=handler)
+        info = UnionNode._maybe_unroll_union(info)
         for node_cls in self.BUILTIN_TYPES.values():
-            is_compatible, expr = node_cls._is_compatible(info)
-            if is_compatible and expr is not None:
-                return node_cls(expr, root=self.root)
+            node = node_cls.create_if_compatible(info.type, root=self.root)
+            if node is not None:
+                return node
         return None
 
     def new_default_node(self, typ: Type) -> 'Node':
@@ -529,6 +605,8 @@ class TypeExpression(RootNode):
             locals = frame.f_locals if locals is None else locals
         new_globals = dict(globals or {})
         new_globals.update(self.extra_locals)
+        if DEBUG:
+            print(f'SOURCE FOR {self!r} ->\n{sourcecode}')
         return self._build_function(
             name, sourcecode,
             locals={} if locals is None else locals,
@@ -602,3 +680,7 @@ class TypeExpression(RootNode):
     @property
     def has_nonfield_types(self) -> bool:
         return bool(self.type_stats.keys() & NONFIELD_TYPES)
+
+
+def _is_NoneType(t: Any) -> bool:
+    return t is type(None) or t is None  # noqa: E721

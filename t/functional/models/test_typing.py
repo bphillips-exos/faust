@@ -14,12 +14,16 @@ from typing import (
 )
 import pytest
 from faust.models import Record
-from faust.models.typing import TypeExpression
+from faust.models.typing import NodeType, TypeExpression
 from faust.types import ModelT
 
 
 class X(Record, namespace='test.X'):
     val: int
+
+
+class Y(Record, namespace='test.Y'):
+    val: str
 
 
 class Z(NamedTuple):
@@ -33,7 +37,7 @@ class TypeExpressionTest(NamedTuple):
     serialized_data: Any
     expected_result: Any
     expected_comprehension: str
-    expected_models: bool
+    expected_types: Dict[NodeType, Set[Type]]
 
 
 def Xi(i):
@@ -59,7 +63,7 @@ CASE_TUPLE_LIST_SET_X = TypeExpressionTest(
 (test__X._from_data_field(a[0]), \
 [{test__X._from_data_field(c) for c in b} \
 for b in a[1]])''',
-    expected_models=True,
+    expected_types={NodeType.MODEL: {X}},
 )
 
 CASE_LIST_LIST_X = TypeExpressionTest(
@@ -75,7 +79,7 @@ CASE_LIST_LIST_X = TypeExpressionTest(
     ],
     expected_comprehension='''\
 [[test__X._from_data_field(c) for c in b] for b in a]''',
-    expected_models=True,
+    expected_types={NodeType.MODEL: {X}},
 )
 
 CASE_DICT_KEY_STR_VALUE_OPTIONAL_SET_X_COMP = '''
@@ -99,7 +103,7 @@ CASE_DICT_KEY_STR_VALUE_OPTIONAL_SET_X = TypeExpressionTest(
         'xuz': set(),
     },
     expected_comprehension=CASE_DICT_KEY_STR_VALUE_OPTIONAL_SET_X_COMP,
-    expected_models=True,
+    expected_types={NodeType.MODEL: {X}},
 )
 
 CASE_DICT_KEY_STR_VALUE_OPTIONAL_SET_ABSMODEL_COMP = '''
@@ -123,7 +127,7 @@ CASE_DICT_KEY_STR_VALUE_OPTIONAL_SET_ABSMODEL = TypeExpressionTest(
         'xuz': set(),
     },
     expected_comprehension=CASE_DICT_KEY_STR_VALUE_OPTIONAL_SET_ABSMODEL_COMP,
-    expected_models=True,
+    expected_types={NodeType.MODEL: {ModelT}},
 )
 # List[Dict[Tuple[int, X], List[Mapping[str, Optional[Set[X]]]]]
 CASE_COMPLEX1_COMP = '''\
@@ -185,7 +189,7 @@ CASE_COMPLEX1 = TypeExpressionTest(
         },
     ],
     expected_comprehension=CASE_COMPLEX1_COMP,
-    expected_models=True,
+    expected_types={NodeType.MODEL: {X}},
 )
 
 
@@ -202,7 +206,7 @@ CASE_DICT_KEY_STR_VALUE_SET_NAMEDTUPLE_Z = TypeExpressionTest(
         'baz': set(),
     },
     expected_comprehension=None,
-    expected_models=True,
+    expected_types={NodeType.MODEL: {X}},
 )
 
 
@@ -211,7 +215,7 @@ CASE_SCALAR_STR = TypeExpressionTest(
     serialized_data='foo',
     expected_result='foo',
     expected_comprehension='a',
-    expected_models=False,
+    expected_types={},
 )
 
 CASE_OPTIONAL_SCALAR_STR = TypeExpressionTest(
@@ -219,7 +223,7 @@ CASE_OPTIONAL_SCALAR_STR = TypeExpressionTest(
     serialized_data=None,
     expected_result=None,
     expected_comprehension='a',
-    expected_models=False,
+    expected_types={},
 )
 
 CASE_SCALAR_INT = TypeExpressionTest(
@@ -227,7 +231,7 @@ CASE_SCALAR_INT = TypeExpressionTest(
     serialized_data=100,
     expected_result=100,
     expected_comprehension='a',
-    expected_models=False,
+    expected_types={},
 )
 
 CASE_LIST_INT = TypeExpressionTest(
@@ -235,7 +239,7 @@ CASE_LIST_INT = TypeExpressionTest(
     serialized_data=[1, 2, 3, 4],
     expected_result=[1, 2, 3, 4],
     expected_comprehension='[b for b in a]',
-    expected_models=False,
+    expected_types={},
 )
 
 CASE_LIST_DECIMAL = TypeExpressionTest(
@@ -253,7 +257,7 @@ CASE_LIST_DECIMAL = TypeExpressionTest(
         Decimal('4.45'),
     ],
     expected_comprehension='[_Decimal_(b) for b in a]',
-    expected_models=False,
+    expected_types={NodeType.DECIMAL: {Decimal}},
 )
 
 CASE_MAPPING_KEY_DATETIME_VALUE_OPTIONAL_LIST_DATETIME = TypeExpressionTest(
@@ -278,7 +282,7 @@ CASE_MAPPING_KEY_DATETIME_VALUE_OPTIONAL_LIST_DATETIME = TypeExpressionTest(
 {_iso8601_parse_(b): \
 ([_iso8601_parse_(d) for d in c] if c is not None else None) \
 for b, c in a.items()}''',
-    expected_models=False,
+    expected_types={NodeType.DATETIME: {datetime}},
 )
 
 CASE_LIST_OPTIONAL_INT = TypeExpressionTest(
@@ -286,7 +290,7 @@ CASE_LIST_OPTIONAL_INT = TypeExpressionTest(
     serialized_data=[1, 2, 3, None, 4],
     expected_result=[1, 2, 3, None, 4],
     expected_comprehension='[(b if b is not None else None) for b in a]',
-    expected_models=False,
+    expected_types={},
 )
 
 CASE_SCALAR_MODEL = TypeExpressionTest(
@@ -294,7 +298,7 @@ CASE_SCALAR_MODEL = TypeExpressionTest(
     serialized_data=X(10).dumps(),
     expected_result=X(10),
     expected_comprehension='test__X._from_data_field(a)',
-    expected_models=True,
+    expected_types={NodeType.MODEL: {X}},
 )
 
 CASE_SCALAR_OPTIONAL_MODEL = TypeExpressionTest(
@@ -303,7 +307,7 @@ CASE_SCALAR_OPTIONAL_MODEL = TypeExpressionTest(
     expected_result=X(10),
     expected_comprehension='''\
 (test__X._from_data_field(a) if a is not None else None)''',
-    expected_models=True,
+    expected_types={NodeType.MODEL: {X}},
 )
 
 CASE_SCALAR_ABSTRACT_MODEL = TypeExpressionTest(
@@ -311,7 +315,7 @@ CASE_SCALAR_ABSTRACT_MODEL = TypeExpressionTest(
     serialized_data=X(10).dumps(),
     expected_result=X(10),
     expected_comprehension='_Model_._from_data_field(a)',
-    expected_models=True,
+    expected_types={NodeType.MODEL: {ModelT}},
 )
 
 CASE_SCALAR_OPTIONAL_ABSTRACT_MODEL = TypeExpressionTest(
@@ -320,7 +324,7 @@ CASE_SCALAR_OPTIONAL_ABSTRACT_MODEL = TypeExpressionTest(
     expected_result=X(10),
     expected_comprehension='''\
 (_Model_._from_data_field(a) if a is not None else None)''',
-    expected_models=True,
+    expected_types={NodeType.MODEL: {ModelT}},
 )
 
 CASE_SCALAR_DECIMAL = TypeExpressionTest(
@@ -328,7 +332,7 @@ CASE_SCALAR_DECIMAL = TypeExpressionTest(
     serialized_data=str(Decimal('120213.123123')),
     expected_result=Decimal('120213.123123'),
     expected_comprehension='_Decimal_(a)',
-    expected_models=False,
+    expected_types={NodeType.DECIMAL: {Decimal}},
 )
 
 NOW = datetime.utcnow()
@@ -337,7 +341,7 @@ CASE_SCALAR_DATETIME = TypeExpressionTest(
     serialized_data=NOW.isoformat(),
     expected_result=NOW,
     expected_comprehension='_iso8601_parse_(a)',
-    expected_models=False,
+    expected_types={NodeType.DATETIME: {datetime}},
 )
 
 CASE_TUPLE_SINGLE_ELEMENT = TypeExpressionTest(
@@ -345,7 +349,7 @@ CASE_TUPLE_SINGLE_ELEMENT = TypeExpressionTest(
     serialized_data=[1, 2, 3],
     expected_result=(1,),
     expected_comprehension='(a[0],)',
-    expected_models=False,
+    expected_types={},
 )
 
 
@@ -354,7 +358,7 @@ CASE_TUPLE_X_VARARGS = TypeExpressionTest(
     serialized_data=[Xi(1), Xi(2), Xi(3)],
     expected_result=(X(1), X(2), X(3)),
     expected_comprehension='tuple(test__X._from_data_field(b) for b in a)',
-    expected_models=True,
+    expected_types={NodeType.MODEL: {X}},
 )
 
 CASE_TUPLE_NO_ARGS = TypeExpressionTest(
@@ -362,7 +366,7 @@ CASE_TUPLE_NO_ARGS = TypeExpressionTest(
     serialized_data=[1, 2, 3],
     expected_result=(1, 2, 3),
     expected_comprehension='tuple(a)',
-    expected_models=False,
+    expected_types={},
 )
 
 CASE_LIST_NO_ARGS = TypeExpressionTest(
@@ -370,7 +374,23 @@ CASE_LIST_NO_ARGS = TypeExpressionTest(
     serialized_data=[1, 2, 3],
     expected_result=[1, 2, 3],
     expected_comprehension='list(a)',
-    expected_models=False,
+    expected_types={},
+)
+
+CASE_UNION_STR_INT_FLOAT = TypeExpressionTest(
+    type_expression=Union[str, int, float],
+    serialized_data='foo',
+    expected_result='foo',
+    expected_comprehension='a',
+    expected_types={},
+)
+
+CASE_UNION_X_Y = TypeExpressionTest(
+    type_expression=Union[X, Y],
+    serialized_data=Y('foo').dumps(),
+    expected_result=Y('foo'),
+    expected_comprehension='_Model_._from_data_field(a)',
+    expected_types={NodeType.MODEL: {ModelT}},
 )
 
 CASES = [
@@ -397,15 +417,9 @@ CASES = [
     CASE_TUPLE_X_VARARGS,
     CASE_TUPLE_NO_ARGS,
     CASE_LIST_NO_ARGS,
+    CASE_UNION_STR_INT_FLOAT,
+    CASE_UNION_X_Y,
 ]
-
-
-@pytest.mark.parametrize('case', CASES)
-def test_compile(case):
-    expr = TypeExpression(case.type_expression)
-    fun = expr.as_function(globals=globals())
-    assert fun(case.serialized_data) == case.expected_result
-    assert expr.has_models == case.expected_models
 
 
 @pytest.mark.parametrize('case', CASES)
@@ -413,3 +427,11 @@ def test_comprehension(case):
     expr = TypeExpression(case.type_expression)
     if case.expected_comprehension:
         assert expr.as_comprehension() == case.expected_comprehension
+
+
+@pytest.mark.parametrize('case', CASES)
+def test_compile(case):
+    expr = TypeExpression(case.type_expression)
+    fun = expr.as_function(globals=globals())
+    assert fun(case.serialized_data) == case.expected_result
+    assert expr.found_types == case.expected_types

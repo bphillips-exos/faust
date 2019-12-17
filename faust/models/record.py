@@ -18,7 +18,6 @@ from typing import (
 
 from mode.utils.objects import (
     annotations,
-    guess_polymorphic_type,
     is_optional,
     remove_optional,
 )
@@ -31,7 +30,6 @@ from faust.types.models import (
     IsInstanceArgT,
     ModelOptions,
     ModelT,
-    TypeInfo,
 )
 from faust.utils import codegen
 
@@ -58,57 +56,6 @@ follow default {fields} {default_names}
 '''
 
 _ReconFun = Callable[..., Any]
-
-# Models can refer to other models:
-#
-#   class M(Model):
-#     x: OtherModel
-#
-# but can also have List-of-X, Mapping-of-X, etc:
-#
-#  class M(Model):
-#    x: List[OtherModel]
-#    y: Mapping[KeyModel, ValueModel]
-#
-# in the source code we refer to a polymorphic type, in the example above
-# the polymorphic type for x would be `list`, and the polymorphic type
-# for y would be `dict`.
-
-__polymorphic_type_cache: Dict[Type, Tuple[Type, Optional[Type]]] = {}
-
-
-def _polymorphic_type(typ: Type) -> Tuple[Type, Optional[Type]]:
-    try:
-        polymorphic_type, cls = __polymorphic_type_cache[typ]
-    except KeyError:
-        val: Tuple[Type, Optional[Type]]
-        try:
-            val = guess_polymorphic_type(typ)
-        except TypeError:
-            val = (TypeError, None)
-        __polymorphic_type_cache[typ] = val
-        return val
-    if polymorphic_type is TypeError:
-        raise TypeError(typ)
-    return polymorphic_type, cls
-
-
-def _is_model(cls: Type) -> Tuple[bool, Type, Optional[Type]]:
-    # Returns (is_model, polymorphic_type).
-    # polymorphic type (if available) will be list if it's a list,
-    # dict if dict, etc, then that means it's a List[ModelType],
-    # Dict[ModelType] etc, so
-    # we have to deserialize them as such.
-    polymorphic_type = None
-    try:
-        polymorphic_type, cls = guess_polymorphic_type(cls)
-    except TypeError:
-        pass
-    member_type = remove_optional(cls)
-    try:
-        return issubclass(member_type, ModelT), member_type, polymorphic_type
-    except TypeError:  # typing.Any cannot be used with subclass
-        return False, cls, None
 
 
 def _maybe_to_representation(val: ModelT = None) -> Optional[Any]:
@@ -209,10 +156,6 @@ class Record(Model, abstract=True):  # type: ignore
                 isinstance(v, FieldDescriptor) and v.required)
         }
 
-        options.models = {}
-        options.polyindex = {}
-        modelattrs = options.modelattrs = {}
-
         # Raise error if non-defaults are mixed in with defaults
         # like namedtuple/dataclasses do.
         local_defaults = []
@@ -234,14 +177,6 @@ class Record(Model, abstract=True):  # type: ignore
                     ))
 
         for field, typ in fields.items():
-            is_model, member_type, generic_type = _is_model(typ)
-            options.polyindex[field] = TypeInfo(generic_type, member_type)
-            if is_model:
-                # Extract all model fields
-                options.models[field] = typ
-                # Create mapping of model fields to polymorphic types if
-                # available
-                modelattrs[field] = generic_type
             if is_optional(typ):
                 # Optional[X] also needs to be added to defaults mapping.
                 options.defaults.setdefault(field, None)
@@ -316,9 +251,12 @@ class Record(Model, abstract=True):  # type: ignore
             except KeyError:
                 default, needed = None, True
             descr = getattr(target, field, None)
-            typeinfo = options.polyindex[field]
+            if is_optional(typ):
+                target_type = remove_optional(typ)
+            else:
+                target_type = typ
             if descr is None or not isinstance(descr, FieldDescriptorT):
-                DescriptorType, tag = field_for_type(typeinfo.member_type)
+                DescriptorType, tag = field_for_type(target_type)
                 if tag:
                     add_to_tagged_indices(field, tag)
                 descr = DescriptorType(
@@ -329,11 +267,8 @@ class Record(Model, abstract=True):  # type: ignore
                     default=default,
                     parent=parent,
                     coerce=coerce,
-                    generic_type=typeinfo.generic_type,
-                    member_type=typeinfo.member_type,
                     date_parser=date_parser,
                     tag=tag,
-                    coercions=options.coercions,
                 )
             else:
                 descr = descr.clone(
@@ -344,16 +279,12 @@ class Record(Model, abstract=True):  # type: ignore
                     default=default,
                     parent=parent,
                     coerce=coerce,
-                    generic_type=typeinfo.generic_type,
-                    member_type=typeinfo.member_type,
-                    coercions=options.coercions,
                 )
 
             descr.on_model_attached()
 
-            related_model = options.models.get(field)
-            if related_model:
-                add_related_to_tagged_indices(field, descr.member_type)
+            for related_model in descr.related_models:
+                add_related_to_tagged_indices(field, related_model)
             setattr(target, field, descr)
             index[field] = descr
 
@@ -406,17 +337,14 @@ class Record(Model, abstract=True):  # type: ignore
         field_positions = options.fieldpos
         optional = options.optionalset
         needs_validation = options.validation
-        models = options.models
-        initfield = options.initfield = {}
         descriptors = options.descriptors
         has_post_init = hasattr(cls, '__post_init__')
         required = []
         opts = []
         setters = []
         for field in field_positions.values():
-            model = models.get(field)
-            fieldval = f'{field}'
-            fieldval = f'self._init_field("{field}", {field})'
+            fieldval = (f'{field} if __strict__ '
+                        f'else self._init_field("{field}", {field})')
             if field in optional:
                 opts.append(f'{field}=None')
                 setters.extend([
@@ -500,12 +428,12 @@ class Record(Model, abstract=True):  # type: ignore
                                 locals=locals())
 
     def _init_field(self, field: str, value: Any) -> Any:
-        options = self._options
-        initfun = options.initfield.get(field)
-        if initfun:
-            value = initfun(value)
-        descriptor = options.descriptors.get(field)
-        if descriptor and descriptor.to_python is not None:
+        # init field from serialized data
+        # will convert e.g. List[Model] back to list of models.
+        # This is only called for Model.from_data(), not when
+        # you create objects in Python or set fields directly.
+        descriptor = self._options.descriptors.get(field)
+        if descriptor is not None:
             value = descriptor.to_python(value)
         return value
 
@@ -538,22 +466,7 @@ class Record(Model, abstract=True):  # type: ignore
 
     @classmethod
     def _BUILD_asdict_field(cls, name: str, field: FieldDescriptorT) -> str:
-        modelattrs = cls._options.modelattrs
-        is_model = name in modelattrs
-        if is_model:
-            generic = modelattrs[name]
-            if generic is list or generic is tuple:
-                return (f'[v.to_representation() for v in self.{name}] '
-                        f'if self.{name} is not None else None')
-            elif generic is set:
-                return f'self.{name}'
-            elif generic is dict:
-                return (f'{{k: v.to_representation() '
-                        f'  for k, v in self.{name}.items()}}')
-            else:
-                return f'_maybe_to_representation(self.{name})'
-        else:
-            return f'self.{name}'
+        return f'self.{name}'
 
     def _derive(self, *objects: ModelT, **fields: Any) -> ModelT:
         data = self.asdict()

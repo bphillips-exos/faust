@@ -8,6 +8,7 @@ from faust.exceptions import SecurityError, ValidationError
 from faust.models import maybe_model
 from faust.models.fields import (
     BytesField,
+    DatetimeField,
     DecimalField,
     FieldDescriptor,
     FloatField,
@@ -162,6 +163,8 @@ def test_datetimes():
     class OptionalListOfDate2(Record, coerce=True):
         dates: Optional[List[datetime]]
 
+    assert isinstance(OptionalDate.date, DatetimeField)
+
     n1 = datetime.utcnow()
     assert Date.loads(Date(date=n1).dumps()).date == n1
     assert OptionalDate.loads(OptionalDate(date=n1).dumps()).date == n1
@@ -186,7 +189,8 @@ def test_datetimes():
     assert MapOfDate.loads(MapOfDate(
         dates={'A': n1, 'B': n2}).dumps()).dates == {'A': n1, 'B': n2}
 
-    datelist = ListOfDate(dates=[n1.isoformat(), n2.isoformat()])
+    datelist = ListOfDate.from_data({
+        'dates': [n1.isoformat(), n2.isoformat()]})
     assert isinstance(datelist.dates[0], datetime)
     assert isinstance(datelist.dates[1], datetime)
 
@@ -236,7 +240,8 @@ def test_datetimes__isodates_compat():
     assert MapOfDate.loads(MapOfDate(
         dates={'A': n1, 'B': n2}).dumps()).dates == {'A': n1, 'B': n2}
 
-    datelist = ListOfDate(dates=[n1.isoformat(), n2.isoformat()])
+    datelist = ListOfDate.from_data({
+        'dates': [n1.isoformat(), n2.isoformat()]})
     assert isinstance(datelist.dates[0], datetime)
     assert isinstance(datelist.dates[1], datetime)
 
@@ -286,7 +291,7 @@ def test_decimals():
     assert MapOfDecimal.loads(MapOfDecimal(
         numbers={'A': n1, 'B': n2}).dumps()).numbers == {'A': n1, 'B': n2}
 
-    dlist = ListOfDecimal(numbers=['1.312341', '3.41569'])
+    dlist = ListOfDecimal.from_data({'numbers': ['1.312341', '3.41569']})
     assert isinstance(dlist.numbers[0], Decimal)
     assert isinstance(dlist.numbers[1], Decimal)
 
@@ -354,7 +359,7 @@ def test_decimals_compat():
     assert MapOfDecimal.loads(MapOfDecimal(
         numbers={'A': n1, 'B': n2}).dumps()).numbers == {'A': n1, 'B': n2}
 
-    dlist = ListOfDecimal(numbers=['1.312341', '3.41569'])
+    dlist = ListOfDecimal.from_data({'numbers': ['1.312341', '3.41569']})
     assert isinstance(dlist.numbers[0], Decimal)
     assert isinstance(dlist.numbers[1], Decimal)
 
@@ -570,7 +575,12 @@ def test_ne(a, b):
 
 
 def test_json():
-    assert User(1, 2, Account(id=1, name=2)).__json__() == {
+    account = Account(id=1, name=2)
+    user = User(1, 2, account)
+
+    payload = json.dumps(user)
+    deser = json.loads(payload)
+    assert deser == {
         'id': 1,
         'username': 2,
         'account': {
@@ -581,6 +591,15 @@ def test_json():
         },
         '__faust': {'ns': User._options.namespace},
     }
+
+    assert user.__json__() == {
+        'id': 1,
+        'username': 2,
+        'account': account,
+        '__faust': {'ns': User._options.namespace},
+    }
+
+    assert User.from_data(deser) == user
 
 
 class test_FieldDescriptor:
@@ -1427,7 +1446,7 @@ def test_datetime_custom_date_parser():
         d: datetime
 
     date_string = 'Sat Jan 12 00:44:36 +0000 2019'
-    assert X(date_string).d == parse_date(date_string)
+    assert X.from_data({'d': date_string}).d == parse_date(date_string)
 
 
 def test_float_does_not_coerce():

@@ -10,12 +10,14 @@ from typing import (
     Iterable,
     Mapping,
     Optional,
+    Set,
     Tuple,
     Type,
     TypeVar,
     cast,
 )
 
+from mode.utils.objects import cached_property
 from mode.utils.text import pluralize
 
 from faust.exceptions import ValidationError
@@ -27,7 +29,7 @@ from faust.types.models import (
 from faust.utils import iso8601
 
 from .tags import Tag
-from .typing import TypeExpression
+from .typing import NodeType, TypeExpression
 
 __all__ = [
     'TYPE_TO_FIELD',
@@ -98,11 +100,6 @@ class FieldDescriptor(FieldDescriptorT[T]):
     #: The model class this field is associated with.
     model: Type[ModelT]
 
-    #: If this holds a generic type such as list/set/dict then
-    #: this holds the type of collection.
-    generic_type: Optional[Type]
-    member_type: Optional[Type]
-
     #: Set if a value for this field is required (cannot be :const:`None`).
     required: bool = True
 
@@ -132,6 +129,7 @@ class FieldDescriptor(FieldDescriptorT[T]):
     tag: Optional[Type[Tag]]
 
     _to_python: Optional[Callable[[T], T]]
+    _expr: Optional[TypeExpression]
 
     def __init__(self, *,
                  field: str = None,
@@ -143,8 +141,6 @@ class FieldDescriptor(FieldDescriptorT[T]):
                  default: T = None,
                  parent: FieldDescriptorT = None,
                  coerce: bool = None,
-                 generic_type: Type = None,
-                 member_type: Type = None,
                  exclude: bool = None,
                  date_parser: Callable[[Any], datetime] = None,
                  tag: Type[Tag] = None,
@@ -157,8 +153,6 @@ class FieldDescriptor(FieldDescriptorT[T]):
         self.required = required
         self.default = default
         self.parent = parent
-        self.generic_type = generic_type
-        self.member_type = member_type
         self._copy_descriptors(self.type)
         if coerce is not None:
             self.coerce = coerce
@@ -170,16 +164,24 @@ class FieldDescriptor(FieldDescriptorT[T]):
         self.date_parser: Callable[[Any], datetime] = date_parser
         self.tag = tag
         self._to_python = None
+        self._expr = None
 
     def on_model_attached(self) -> None:
+        self._expr = self._prepare_type_expression()
         self._to_python = self._compile_type_expression()
 
-    def _compile_type_expression(self) -> Optional[Callable[[T], T]]:
+    def _prepare_type_expression(self) -> TypeExpression:
         assert self.model is not None
         expr = TypeExpression(
             self.type,
             user_types=self.model._options.coercions,
+            date_parser=self.date_parser,
         )
+        return expr
+
+    def _compile_type_expression(self) -> Optional[Callable[[T], T]]:
+        assert self._expr is not None
+        expr = self._expr
         comprehension = expr.as_function(stacklevel=2)
         if (expr.has_generic_types and
                 expr.has_custom_types) or expr.has_nonfield_types:
@@ -204,8 +206,6 @@ class FieldDescriptor(FieldDescriptorT[T]):
             'default': self.default,
             'parent': self.parent,
             'coerce': self.coerce,
-            'generic_type': self.generic_type,
-            'member_type': self.member_type,
             'exclude': self.exclude,
             'date_parser': self.date_parser,
             'tag': self.tag,
@@ -275,6 +275,7 @@ class FieldDescriptor(FieldDescriptorT[T]):
         return ValidationError(reason, field=self)
 
     def __set__(self, instance: Any, value: T) -> None:
+        value = cast(T, self.prepare_value(value))
         if self.tag:
             store_value = cast(T, self.tag(value, field=self.field))
         else:
@@ -290,6 +291,11 @@ class FieldDescriptor(FieldDescriptorT[T]):
     def ident(self) -> str:
         """Return the fields identifier."""
         return f'{self.model.__name__}.{self.field}'
+
+    @cached_property
+    def related_models(self) -> Set[Type[ModelT]]:
+        assert self._expr is not None
+        return self._expr.found_types[NodeType.MODEL]
 
 
 class BooleanField(FieldDescriptor[bool]):

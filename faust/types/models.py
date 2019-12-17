@@ -11,14 +11,15 @@ from typing import (
     List,
     Mapping,
     MutableMapping,
-    NamedTuple,
     Optional,
+    Set,
     Tuple,
     Type,
     TypeVar,
     Union,
     cast,
 )
+from mode.utils.objects import cached_property
 from faust.exceptions import ValidationError  # XXX !!coupled
 from .codecs import CodecArg
 
@@ -30,7 +31,6 @@ __all__ = [
     'ModelArg',
     'ModelOptions',
     'ModelT',
-    'TypeInfo',
 ]
 
 FieldMap = Mapping[str, 'FieldDescriptorT']
@@ -62,11 +62,6 @@ ModelArg = Union[Type['ModelT'], Type[bytes], Type[str]]
 IsInstanceArgT = Union[Type, Tuple[Type, ...]]
 CoercionHandler = Callable[[Any], Any]
 CoercionMapping = MutableMapping[IsInstanceArgT, CoercionHandler]
-
-
-class TypeInfo(NamedTuple):
-    generic_type: Optional[Type]
-    member_type: Type
 
 
 class ModelOptions(abc.ABC):
@@ -106,25 +101,9 @@ class ModelOptions(abc.ABC):
     #: Index: Set of optional field names, for fast argument checking.
     optionalset: FrozenSet[str] = cast(FrozenSet[str], None)
 
-    #: Index: Mapping of fields that are ModelT
-    models: Mapping[str, Type['ModelT']] = cast(
-        Mapping[str, Type['ModelT']], None)
-
-    # Index: Set of field names that are ModelT and their concrete type
-    modelattrs: Mapping[str, Optional[Type]] = cast(
-        Mapping[str, Optional[Type]], None)
-
     #: Mapping of field names to default value.
     defaults: Mapping[str, Any] = cast(  # noqa: E704 (flake8 bug)
         Mapping[str, Any], None)
-
-    #: Mapping of init field conversion callbacks.
-    initfield: Mapping[str, CoercionHandler] = cast(
-        Mapping[str, CoercionHandler], None)
-
-    #: Index of field to polymorphic type
-    polyindex: Mapping[str, TypeInfo] = cast(
-        Mapping[str, TypeInfo], None)
 
     tagged_fields: FrozenSet[str] = cast(FrozenSet[str], None)
     personal_fields: FrozenSet[str] = cast(FrozenSet[str], None)
@@ -215,8 +194,6 @@ class FieldDescriptorT(Generic[T]):
     required: bool = True
     default: Optional[T] = None  # noqa: E704
     parent: Optional['FieldDescriptorT']
-    generic_type: Optional[Type]
-    member_type: Optional[Type]
     exclude: bool
 
     @abc.abstractmethod
@@ -229,8 +206,6 @@ class FieldDescriptorT(Generic[T]):
                  required: bool = True,
                  default: T = None,
                  parent: 'FieldDescriptorT' = None,
-                 generic_type: Type = None,
-                 member_type: Type = None,
                  exclude: bool = None,
                  date_parser: Callable[[Any], datetime] = None,
                  **kwargs: Any) -> None:
@@ -282,6 +257,11 @@ class FieldDescriptorT(Generic[T]):
     @property
     @abc.abstractmethod
     def ident(self) -> str:
+        ...
+
+    @cached_property
+    @abc.abstractmethod
+    def related_models(self) -> Set[Type[ModelT]]:
         ...
 
 
